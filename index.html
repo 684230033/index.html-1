@@ -1870,6 +1870,171 @@ function saveStorage() {
         .then(res => res.json())
         .then(data => console.log("Cloud sync success:", data))
         .catch(err => console.log("Cloud sync error:", err));
+        // ==========================================
+// 1. ตั้งค่าการเชื่อมต่อ Google Script Cloud
+// ==========================================
+var GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwMNbJdNUjv_8MQ-EdHAamLw9uhjw0sTQ8wwMDiQdE9TfargTdAvGhCr5aq07DVt25Q/exec";
+
+// ตัวแประบบหลัก
+var students = JSON.parse(localStorage.getItem('sr_students')) || [];
+var equipment = JSON.parse(localStorage.getItem('sr_equipment')) || [];
+var borrows = JSON.parse(localStorage.getItem('sr_borrows')) || [];
+var settings = JSON.parse(localStorage.getItem('sr_settings')) || { rulePenalty: '', ruleRestore: '' };
+var currentUser = JSON.parse(localStorage.getItem('sr_currentUser')) || null;
+
+// เซฟลง Local Storage ของเครื่องชั่วคราว
+function saveToLocal() {
+    localStorage.setItem('sr_students', JSON.stringify(students));
+    localStorage.setItem('sr_equipment', JSON.stringify(equipment));
+    localStorage.setItem('sr_borrows', JSON.stringify(borrows));
+    localStorage.setItem('sr_settings', JSON.stringify(settings));
+    if (currentUser) {
+        localStorage.setItem('sr_currentUser', JSON.stringify(currentUser));
+    }
+}
+
+// ==========================================
+// 2. ฟังก์ชัน บันทึก & โหลด Cloud แบบ Smart Merge (ข้อมูลไม่หายแน่นอน)
+// ==========================================
+function saveStorage() {
+    saveToLocal(); // บันทึกลงเครื่องทันที
+
+    if (GOOGLE_SCRIPT_URL && GOOGLE_SCRIPT_URL.indexOf('script.google.com') !== -1) {
+        var payload = {
+            students: students,
+            equipment: equipment,
+            borrows: borrows,
+            settings: settings
+        };
+        fetch(GOOGLE_SCRIPT_URL, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
+            body: JSON.stringify(payload)
+        })
+        .then(res => res.json())
+        .then(data => console.log("Cloud sync success:", data))
+        .catch(err => console.log("Cloud sync error:", err));
+    }
+}
+
+function loadStorage(callback) {
+    if (!GOOGLE_SCRIPT_URL || GOOGLE_SCRIPT_URL.indexOf('script.google.com') === -1) return;
+
+    fetch(GOOGLE_SCRIPT_URL)
+        .then(res => res.json())
+        .then(data => {
+            if (data && typeof data === 'object') {
+                // 1. ผสานข้อมูลนักเรียน (ป้องกันสมาชิกใหม่หายถ้า Cloud บันทึกไม่ทัน)
+                var cloudStudents = data.students || [];
+                var localStudents = JSON.parse(localStorage.getItem('sr_students')) || [];
+                var studentMap = {};
+                
+                cloudStudents.concat(localStudents).forEach(s => {
+                    if (s && s.studentId) {
+                        studentMap[String(s.studentId).trim()] = s;
+                    }
+                });
+                students = Object.values(studentMap);
+
+                // 2. ผสานรายการยืม-คืนทั้งหมด (Admin จะเห็นประวัติครบถ้วนไม่มีวันลบ)
+                var cloudBorrows = data.borrows || [];
+                var localBorrows = JSON.parse(localStorage.getItem('sr_borrows')) || [];
+                var borrowMap = {};
+                
+                cloudBorrows.concat(localBorrows).forEach(b => {
+                    if (b && b.id) {
+                        borrowMap[b.id] = b;
+                    }
+                });
+                borrows = Object.values(borrowMap);
+
+                // 3. อัปเดตอุปกรณ์และตั้งค่า
+                if (data.equipment) equipment = data.equipment;
+                if (data.settings) settings = data.settings;
+
+                saveToLocal();
+
+                // อัปเดตหน้าจอทันที
+                if (typeof renderAll === 'function') renderAll();
+                if (typeof updateUI === 'function') updateUI();
+
+                if (callback) callback();
+            }
+        })
+        .catch(err => console.log("Cloud load error:", err));
+}
+
+// ==========================================
+// 3. ปรับปรุงระบบ สมัครสมาชิก & ล็อกอิน (ล็อกรหัสเป็น String)
+// ==========================================
+function registerStudent(studentId, fullName, grade, roomNumber, phone, pin) {
+    var cleanId = String(studentId).trim();
+    var cleanPin = String(pin).trim();
+
+    // เช็กว่ามีรหัสนักเรียนนี้อยู่แล้วหรือไม่
+    var exists = students.some(s => String(s.studentId).trim() === cleanId);
+    if (exists) {
+        alert("รหัสนักเรียนนี้ลงทะเบียนในระบบแล้ว");
+        return false;
+    }
+
+    var newStudent = {
+        studentId: cleanId,
+        fullName: String(fullName).trim(),
+        grade: grade,
+        roomNumber: roomNumber,
+        phone: String(phone).trim(),
+        pin: cleanPin,
+        role: 'student',
+        score: 100,
+        scoreLogs: [{
+            date: new Date().toISOString(),
+            points: 100,
+            reason: 'คะแนนแรกเริ่มเปิดบัญชีนักเรียน'
+        }]
+    };
+
+    students.push(newStudent);
+    saveStorage(); // บันทึกลง Local และ Cloud ทันที
+    alert("ลงทะเบียนสำเร็จ! สามารถเข้าสู่ระบบได้ทันที");
+    return true;
+}
+
+function loginUser(inputId, inputPin) {
+    var cleanId = String(inputId).trim();
+    var cleanPin = String(inputPin).trim();
+
+    // กรณี Admin
+    if (cleanId.toUpperCase() === 'ADMIN' && cleanPin === '1234') {
+        currentUser = { role: 'admin', fullName: 'ผู้ดูแลระบบ (Admin)' };
+        localStorage.setItem('sr_currentUser', JSON.stringify(currentUser));
+        return { success: true, role: 'admin' };
+    }
+
+    // กรณี นักเรียน (บังคับเทียบแบบ String ป้องกันปัญหา 0 นำหน้า)
+    var found = students.find(s => String(s.studentId).trim() === cleanId && String(s.pin).trim() === cleanPin);
+
+    if (found) {
+        currentUser = found;
+        localStorage.setItem('sr_currentUser', JSON.stringify(currentUser));
+        return { success: true, role: 'student', user: found };
+    } else {
+        return { success: false, message: "รหัสประจำตัวนักเรียน หรือ PIN ไม่ถูกต้อง" };
+    }
+}
+
+// ==========================================
+// 4. ระบบ Real-time Auto Refresh (ซิงค์ทุก 5 วินาที)
+// ==========================================
+window.addEventListener('DOMContentLoaded', function() {
+    // โหลดข้อมูลครั้งแรกเมื่อเปิดหน้า
+    loadStorage();
+
+    // ดึงข้อมูล Real-time จาก Cloud ทุกๆ 5 วินาที (เพื่อให้ Admin เห็นทุกคนที่ยืมแบบ Real-time)
+    setInterval(function() {
+        loadStorage();
+    }, 5000);
+});
     }
 }
     </script>
