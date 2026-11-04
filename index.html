@@ -1849,112 +1849,203 @@
                     return '-';
             }
         }
-       var GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwMNbJdNUjv_8MQ-EdHAamLw9uhjw0sTQ8wwMDiQdE9TfargTdAvGhCr5aq07DVt25Q/exec";
 
-function saveStorage() {
-    if (currentUser) {
-        localStorage.setItem('sr_currentUser', JSON.stringify(currentUser));
-    }
-    if (GOOGLE_SCRIPT_URL && GOOGLE_SCRIPT_URL.indexOf('script.google.com') !== -1) {
-        var payload = {
-            students: students,
-            equipment: equipment,
-            borrows: borrows,
-            settings: settings
-        };
-        fetch(GOOGLE_SCRIPT_URL, {
-            method: "POST",
-            headers: { "Content-Type": "text/plain;charset=utf-8" },
-            body: JSON.stringify(payload)
-        })
-        .then(res => res.json())
-        .then(data => console.log("Cloud sync success:", data))
-        .catch(err => console.log("Cloud sync error:", err));
-        // ==========================================
-// 1. ตั้งค่าการเชื่อมต่อ Google Script Cloud
-// ==========================================
-var GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwMNbJdNUjv_8MQ-EdHAamLw9uhjw0sTQ8wwMDiQdE9TfargTdAvGhCr5aq07DVt25Q/exec";
+        // ===== PATCH: reliable local/cloud persistence + stable session =====
+        var GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwMNbJdNUjv_8MQ-EdHAamLw9uhjw0sTQ8wwMDiQdE9TfargTdAvGhCr5aq07DVt25Q/exec";
+        var cloudWriteQueue = Promise.resolve();
+        var cloudReady = false;
+        var cloudSyncBusy = false;
+        var lastCloudSync = 0;
 
-// ตัวแประบบหลัก
-var students = JSON.parse(localStorage.getItem('sr_students')) || [];
-var equipment = JSON.parse(localStorage.getItem('sr_equipment')) || [];
-var borrows = JSON.parse(localStorage.getItem('sr_borrows')) || [];
-var settings = JSON.parse(localStorage.getItem('sr_settings')) || { rulePenalty: '', ruleRestore: '' };
-var currentUser = JSON.parse(localStorage.getItem('sr_currentUser')) || null;
-
-// เซฟลง Local Storage ของเครื่องชั่วคราว
-function saveToLocal() {
-    localStorage.setItem('sr_students', JSON.stringify(students));
-    localStorage.setItem('sr_equipment', JSON.stringify(equipment));
-    localStorage.setItem('sr_borrows', JSON.stringify(borrows));
-    localStorage.setItem('sr_settings', JSON.stringify(settings));
-    if (currentUser) {
-        localStorage.setItem('sr_currentUser', JSON.stringify(currentUser));
-    }
-}
-
-// ==========================================
-// 2. ฟังก์ชัน บันทึก & โหลด Cloud แบบ Smart Merge (ข้อมูลไม่หายแน่นอน)
-// ==========================================
-function saveStorage() {
-    saveToLocal(); // บันทึกลงเครื่องทันที
-
-    if (GOOGLE_SCRIPT_URL && GOOGLE_SCRIPT_URL.indexOf('script.google.com') !== -1) {
-        var payload = {
-            students: students,
-            equipment: equipment,
-            borrows: borrows,
-            settings: settings
-        };
-        fetch(GOOGLE_SCRIPT_URL, {
-            method: "POST",
-            headers: { "Content-Type": "text/plain;charset=utf-8" },
-            body: JSON.stringify(payload)
-        })
-        .then(res => res.json())
-        .then(data => console.log("Cloud sync success:", data))
-        .catch(err => console.log("Cloud sync error:", err));
-    }
-}
-
-// ==========================================
-// ฟังก์ชันดึงข้อมูลสดข้ามเครื่องแบบ Real-time (บังคับล้าง Cache)
-// ==========================================
-function loadStorage(callback) {
-    if (!GOOGLE_SCRIPT_URL || GOOGLE_SCRIPT_URL.indexOf('script.google.com') === -1) return;
-
-    // เติม nocache=Date.now() เพื่อบังคับ Google Sheets ส่งข้อมูลล่าสุดจากเครื่องอื่นมาทันที
-    var freshUrl = GOOGLE_SCRIPT_URL + (GOOGLE_SCRIPT_URL.indexOf('?') === -1 ? '?' : '&') + 'nocache=' + Date.now();
-
-    fetch(freshUrl, {
-        method: "GET",
-        headers: { "Cache-Control": "no-cache, no-store, must-revalidate" }
-    })
-    .then(res => res.json())
-    .then(data => {
-        if (data && typeof data === 'object') {
-            if (Array.isArray(data.borrows)) borrows = data.borrows;
-            if (Array.isArray(data.students)) students = data.students;
-            if (Array.isArray(data.equipment)) equipment = data.equipment;
-            if (data.settings) settings = data.settings;
-
-            if (typeof saveToLocal === 'function') saveToLocal();
-
-            if (typeof renderAll === 'function') renderAll();
-            if (typeof renderAdminDashboard === 'function') renderAdminDashboard();
-            if (typeof renderAdminRequests === 'function') renderAdminRequests();
-
-            if (callback) callback();
+        function saveLocalSnapshot() {
+            localStorage.setItem('sr_students', JSON.stringify(students || []));
+            localStorage.setItem('sr_equipment', JSON.stringify(equipment || []));
+            localStorage.setItem('sr_borrows', JSON.stringify(borrows || []));
+            localStorage.setItem('sr_settings', JSON.stringify(settings || {}));
+            if (currentUser) localStorage.setItem('sr_currentUser', JSON.stringify(currentUser));
+            else localStorage.removeItem('sr_currentUser');
         }
-    })
-    .catch(err => console.log("Realtime Sync Error:", err));
-}
 
-// ตั้งเวลาดึงข้อมูลใหม่จาก Cloud ทุกๆ 3 วินาทีอัตโนมัติ
-if (window.syncTimer) clearInterval(window.syncTimer);
-window.syncTimer = setInterval(function() {
-    loadStorage();
-}, 3000);
+        function saveStorage() {
+            saveLocalSnapshot(); // local-first: never wait for network
+            if (!GOOGLE_SCRIPT_URL) return;
+            var payload = {
+                action: 'save',
+                students: students || [],
+                equipment: equipment || [],
+                borrows: borrows || [],
+                settings: settings || {},
+                updatedAt: new Date().toISOString()
+            };
+            // Serialize writes so an older request cannot overwrite a newer change.
+            cloudWriteQueue = cloudWriteQueue.then(function () {
+                return fetch(GOOGLE_SCRIPT_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                    body: JSON.stringify(payload),
+                    cache: 'no-store'
+                }).then(function (res) {
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    return res.text();
+                }).then(function (text) {
+                    var result;
+                    try { result = JSON.parse(text); } catch (_) { result = { raw: text }; }
+                    if (result && result.success === false) throw new Error(result.message || 'Cloud rejected save');
+                    lastCloudSync = Date.now();
+                    console.info('Cloud save complete', result);
+                });
+            }).catch(function (err) {
+                console.error('Cloud save failed; local copy is safe:', err);
+            });
+            return cloudWriteQueue;
+        }
+
+        function mergeByKey(cloudList, localList, keyName) {
+            var map = Object.create(null);
+            // Cloud is applied first; local fills only records missing from cloud.
+            (Array.isArray(cloudList) ? cloudList : []).forEach(function (item) {
+                if (item && item[keyName] !== undefined && item[keyName] !== null)
+                    map[String(item[keyName]).trim()] = item;
+            });
+            (Array.isArray(localList) ? localList : []).forEach(function (item) {
+                if (item && item[keyName] !== undefined && item[keyName] !== null) {
+                    var key = String(item[keyName]).trim();
+                    if (!map[key]) map[key] = item;
+                }
+            });
+            return Object.keys(map).map(function (key) { return map[key]; });
+        }
+
+        function loadStorage(options) {
+            options = options || {};
+            if (!GOOGLE_SCRIPT_URL) return Promise.resolve(false);
+            if (cloudSyncBusy) return Promise.resolve(false);
+            cloudSyncBusy = true;
+            var localStudents = JSON.parse(localStorage.getItem('sr_students') || '[]');
+            var localBorrows = JSON.parse(localStorage.getItem('sr_borrows') || '[]');
+            return fetch(GOOGLE_SCRIPT_URL + '?t=' + Date.now(), { method: 'GET', cache: 'no-store' })
+                .then(function (res) {
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    return res.json();
+                })
+                .then(function (data) {
+                    if (!data || typeof data !== 'object') throw new Error('Invalid cloud response');
+                    students = mergeByKey(data.students, localStudents, 'studentId');
+                    borrows = mergeByKey(data.borrows, JSON.parse(localStorage.getItem('sr_borrows') || '[]'), 'id');
+                    if (Array.isArray(data.equipment) && data.equipment.length) equipment = data.equipment;
+                    if (data.settings && typeof data.settings === 'object') settings = data.settings;
+                    saveLocalSnapshot();
+                    cloudReady = true;
+                    lastCloudSync = Date.now();
+
+                    // Keep the current screen and selected tab. Refresh only its contents.
+                    if (currentUser) {
+                        if (currentUser.role === 'student') {
+                            var latest = students.find(function (s) {
+                                return String(s.studentId).trim() === String(currentUser.studentId).trim();
+                            });
+                            if (latest) currentUser = latest;
+                            renderStudentPortal();
+                            var tab = !document.getElementById('stdTabHistory').classList.contains('hidden') ? 'history' :
+                                      !document.getElementById('stdTabScore').classList.contains('hidden') ? 'score' : 'borrow';
+                            switchStudentTab(tab);
+                        } else if (currentUser.role === 'admin') {
+                            renderAdminPortal();
+                        }
+                    }
+                    applySettings();
+                    if (typeof options.callback === 'function') options.callback();
+                    return true;
+                })
+                .catch(function (err) {
+                    console.error('Cloud load failed; using local data:', err);
+                    cloudReady = true; // allow offline login against this device's saved data
+                    return false;
+                })
+                .finally(function () { cloudSyncBusy = false; });
+        }
+
+        // Registration checks the cloud first to prevent duplicate IDs across devices.
+        function processRegister(e) {
+            e.preventDefault();
+            var studentId = String(document.getElementById('regId').value).trim();
+            var name = document.getElementById('regName').value.trim();
+            var grade = document.getElementById('regGrade').value.trim();
+            var roomNo = String(document.getElementById('regRoomNo').value).trim();
+            var phone = document.getElementById('regPhone').value.trim();
+            var pin = String(document.getElementById('regPin').value).trim();
+
+            if (!/^\d{5}$/.test(studentId)) return alert('กรุณากรอกรหัสนักเรียนเป็นตัวเลข 5 หลัก');
+            if (!/^\d{4,6}$/.test(pin)) return alert('PIN ต้องเป็นตัวเลข 4-6 หลัก');
+            if (!name || !grade || !roomNo || !phone) return alert('กรุณากรอกข้อมูลให้ครบ');
+
+            loadStorage().then(function () {
+                if (students.some(function (s) { return String(s.studentId).trim() === studentId; })) {
+                    alert('รหัสนักเรียนนี้มีผู้ลงทะเบียนแล้ว กรุณาเข้าสู่ระบบด้วยรหัสเดิม');
+                    switchAuthTab('login');
+                    document.getElementById('loginId').value = studentId;
+                    return;
+                }
+                var newStudent = {
+                    studentId: studentId, fullName: name, grade: grade, roomNumber: roomNo,
+                    phone: phone, pin: pin, role: 'student', score: 100,
+                    scoreLogs: [{ date: new Date().toISOString(), points: 100, reason: 'คะแนนแรกเริ่มเปิดบัญชีนักเรียน' }]
+                };
+                students.push(newStudent);
+                currentUser = newStudent;
+                saveStorage();
+                alert('ลงทะเบียนสำเร็จ! เข้าสู่ระบบให้อัตโนมัติ');
+                document.getElementById('formRegister').reset();
+                renderApp();
+            });
+        }
+
+        function processLogin(e) {
+            e.preventDefault();
+            var inputId = String(document.getElementById('loginId').value).trim();
+            var inputPin = String(document.getElementById('loginPin').value).trim();
+            var submit = document.querySelector('#formLogin button[type="submit"]');
+            if (submit) submit.disabled = true;
+
+            loadStorage().then(function () {
+                if (inputId.toUpperCase() === ADMIN_CREDS.studentId && inputPin === ADMIN_CREDS.pin) {
+                    currentUser = ADMIN_CREDS;
+                } else {
+                    var found = students.find(function (s) {
+                        return String(s.studentId).trim() === inputId && String(s.pin).trim() === inputPin;
+                    });
+                    if (!found) {
+                        alert('ไม่พบข้อมูลบัญชีนี้ หรือ PIN ไม่ถูกต้อง หากเคยลงทะเบียนแล้วให้ตรวจสอบรหัสนักเรียนและ PIN เดิม');
+                        if (submit) submit.disabled = false;
+                        return;
+                    }
+                    currentUser = found;
+                }
+                saveLocalSnapshot();
+                renderApp();
+                if (submit) submit.disabled = false;
+            });
+        }
+
+        // Refresh data every 5 seconds without resetting authentication or returning to register.
+        document.addEventListener('DOMContentLoaded', function () {
+            loadStorage();
+            window.setInterval(function () {
+                if (!document.hidden) loadStorage();
+            }, 5000);
+        });
+        window.addEventListener('storage', function (event) {
+            if (event.key && event.key.indexOf('sr_') === 0) {
+                students = JSON.parse(localStorage.getItem('sr_students') || '[]');
+                borrows = JSON.parse(localStorage.getItem('sr_borrows') || '[]');
+                equipment = JSON.parse(localStorage.getItem('sr_equipment') || '[]');
+                settings = JSON.parse(localStorage.getItem('sr_settings') || '{}');
+                currentUser = JSON.parse(localStorage.getItem('sr_currentUser') || 'null');
+                renderApp();
+            }
+        });
+        // ===== END PATCH =====
+
     </script>
 </body>
 </html>
