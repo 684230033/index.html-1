@@ -1849,7 +1849,29 @@
                     return '-';
             }
         }
-        var GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwMNbJdNUjv_8MQ-EdHAamLw9uhjw0sTQ8wwMDiQdE9TfargTdAvGhCr5aq07DVt25Q/exec";
+       var GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwMNbJdNUjv_8MQ-EdHAamLw9uhjw0sTQ8wwMDiQdE9TfargTdAvGhCr5aq07DVt25Q/exec";
+
+function saveStorage() {
+    if (currentUser) {
+        localStorage.setItem('sr_currentUser', JSON.stringify(currentUser));
+    }
+    if (GOOGLE_SCRIPT_URL && GOOGLE_SCRIPT_URL.indexOf('script.google.com') !== -1) {
+        var payload = {
+            students: students,
+            equipment: equipment,
+            borrows: borrows,
+            settings: settings
+        };
+        fetch(GOOGLE_SCRIPT_URL, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
+            body: JSON.stringify(payload)
+        })
+        .then(res => res.json())
+        .then(data => console.log("Cloud sync success:", data))
+        .catch(err => console.log("Cloud sync error:", err));
+    }
+}
     </script>
 </body>
 </html>
