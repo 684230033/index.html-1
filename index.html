@@ -1851,7 +1851,7 @@
         }
 
         // ===== PATCH: reliable local/cloud persistence + stable session =====
-        var GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwMNbJdNUjv_8MQ-EdHAamLw9uhjw0sTQ8wwMDiQdE9TfargTdAvGhCr5aq07DVt25Q/exec";
+        var GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxntcI_PvB-ste8e7m6qi7-30p1-MctP_rDqDbA_vVQe4l1IUFIBTt-nVhB05VNd-Es/exec";
         var cloudWriteQueue = Promise.resolve();
         var cloudReady = false;
         var cloudSyncBusy = false;
@@ -1900,18 +1900,25 @@
             return cloudWriteQueue;
         }
 
-        function mergeByKey(cloudList, localList, keyName) {
+        function mergeByKey(cloudList, localList, keyName, preferLocalOnTie) {
             var map = Object.create(null);
-            // Cloud is applied first; local fills only records missing from cloud.
-            (Array.isArray(cloudList) ? cloudList : []).forEach(function (item) {
-                if (item && item[keyName] !== undefined && item[keyName] !== null)
-                    map[String(item[keyName]).trim()] = item;
-            });
+            function stamp(item) {
+                var value = item && (item.updatedAt || item.createdAt);
+                var time = value ? Date.parse(value) : 0;
+                return isFinite(time) ? time : 0;
+            }
+            // Merge by ID. The record with the newest timestamp wins; when timestamps
+            // are absent/equal, keep the local copy to avoid reverting a recent local PIN.
             (Array.isArray(localList) ? localList : []).forEach(function (item) {
-                if (item && item[keyName] !== undefined && item[keyName] !== null) {
-                    var key = String(item[keyName]).trim();
-                    if (!map[key]) map[key] = item;
-                }
+                if (!item || item[keyName] == null) return;
+                map[String(item[keyName]).trim()] = item;
+            });
+            (Array.isArray(cloudList) ? cloudList : []).forEach(function (item) {
+                if (!item || item[keyName] == null) return;
+                var key = String(item[keyName]).trim();
+                var local = map[key];
+                if (!local || stamp(item) > stamp(local)) map[key] = item;
+                else if (stamp(item) === stamp(local)) map[key] = preferLocalOnTie ? Object.assign({}, item, local) : Object.assign({}, local, item);
             });
             return Object.keys(map).map(function (key) { return map[key]; });
         }
@@ -1930,8 +1937,8 @@
                 })
                 .then(function (data) {
                     if (!data || typeof data !== 'object') throw new Error('Invalid cloud response');
-                    students = mergeByKey(data.students, localStudents, 'studentId');
-                    borrows = mergeByKey(data.borrows, JSON.parse(localStorage.getItem('sr_borrows') || '[]'), 'id');
+                    students = mergeByKey(data.students, localStudents, 'studentId', true);
+                    borrows = mergeByKey(data.borrows, JSON.parse(localStorage.getItem('sr_borrows') || '[]'), 'id', false);
                     if (Array.isArray(data.equipment) && data.equipment.length) equipment = data.equipment;
                     if (data.settings && typeof data.settings === 'object') settings = data.settings;
                     saveLocalSnapshot();
@@ -1988,7 +1995,7 @@
                 }
                 var newStudent = {
                     studentId: studentId, fullName: name, grade: grade, roomNumber: roomNo,
-                    phone: phone, pin: pin, role: 'student', score: 100,
+                    phone: phone, pin: pin, role: 'student', updatedAt: new Date().toISOString(), score: 100,
                     scoreLogs: [{ date: new Date().toISOString(), points: 100, reason: 'คะแนนแรกเริ่มเปิดบัญชีนักเรียน' }]
                 };
                 students.push(newStudent);
@@ -2028,8 +2035,25 @@
         }
 
         // Refresh data every 5 seconds without resetting authentication or returning to register.
+        function ensureDemoAccount() {
+            var demoId = '15686';
+            if (!students.some(function (student) { return String(student.studentId).trim() === demoId; })) {
+                var now = new Date().toISOString();
+                students.push({
+                    studentId: demoId, fullName: 'ผู้ใช้ทดลองระบบ', grade: 'ทดลองใช้งาน',
+                    roomNumber: '-', phone: '-', pin: '1234', role: 'student', score: 100,
+                    scoreLogs: [{ date: now, points: 100, reason: 'บัญชีทดลองระบบ' }],
+                    createdAt: now, updatedAt: now
+                });
+                saveStorage();
+            }
+        }
+
         document.addEventListener('DOMContentLoaded', function () {
-            loadStorage();
+            loadStorage().then(function () {
+                ensureDemoAccount();
+                renderApp();
+            });
             window.setInterval(function () {
                 if (!document.hidden) loadStorage();
             }, 5000);
@@ -2046,6 +2070,35 @@
         });
         // ===== END PATCH =====
 
-    </script>
+        // Demo account for evaluation. It is created only if the ID does not exist.
+        // Student ID: 15686 | PIN: 1234
+        document.addEventListener('DOMContentLoaded', function () {
+            loadStorage().then(function () {
+                var demoId = '15686';
+                var exists = students.some(function (student) {
+                    return String(student.studentId).trim() === demoId;
+                });
+                if (!exists) {
+                    students.push({
+                        studentId: demoId,
+                        fullName: 'ผู้ใช้ทดลองระบบ',
+                        grade: 'ทดลองใช้งาน',
+                        roomNumber: '-',
+                        phone: '-',
+                        pin: '1234',
+                        role: 'student',
+                        score: 100,
+                        scoreLogs: [{ date: new Date().toISOString(), points: 100, reason: 'บัญชีทดลองระบบ' }],
+                        createdAt: new Date().toISOString(),
+                        updatedAt: new Date().toISOString()
+                    });
+                    saveStorage();
+                }
+            }).catch(function (error) {
+                console.error('Demo account initialization failed:', error);
+            });
+        });
+
+</script>
 </body>
 </html>
